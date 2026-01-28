@@ -1,0 +1,1279 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+local Fsys = require(ReplicatedStorage:WaitForChild("Fsys"))
+local UIManager = Fsys.load("UIManager")
+
+local TradeApp = UIManager.apps.TradeApp
+if not TradeApp then
+    warn("[FakeTrade] TradeApp not found. Abort.")
+    return
+end
+
+local originalAccept     = TradeApp._on_accept_pressed
+local originalConfirm    = TradeApp._on_confirm_pressed
+local originalOverwrite  = TradeApp._overwrite_local_trade_state
+local originalRemove     = TradeApp._remove_item_from_my_offer or function() end
+
+local fakeActive               = false
+local fakeTradeId              = nil
+local currentTargetName        = "VegasHills"
+local currentTargetDisplayName = "VegasHills"
+local currentTargetId          = 0
+local desiredMaxSpectators     = 5
+local spectatorLoopRunning     = false
+local allowOverwrite           = false       
+local tradeUnlockAt = 0
+local LOCK_DURATION = 5
+
+local STATIC_PLAYER_NAMES = {
+    "Roblox",
+    "builderman",
+    "⭐️ cammyxboba",
+    "⭐️ themeganplays",
+    "⭐️ notleah",
+    "bitchybitch",
+    "kellyspins",
+     "starpetsrestocker",
+     "starpets",
+     "askm9ikey",
+     " mikedrop937",
+     "rainbowriley321",
+     "roplexyoutube",
+     " JesseRaen",
+     "stranger_s4mu",
+    "⭐️ THE_TORNADO",
+}
+
+local cachedUserIds = {}
+
+local PET_KINDS = {
+    "ugc_refresh_2023_african_wild_dog",
+    "albino_monkey",
+    "arctic_reindeer",
+    "summerfest_2024_balloon_unicorn",
+    "bat_dragon",
+    "lures_2023_blazing_lion",
+    "easter_2024_candyfloss_chick",
+    "crow",
+    "frost_dragon",
+    "giraffe",
+    "pride_2022_goat",
+    "springfest_2023_hare",
+    "elf_hedgehog",
+    "owl",
+    "parrot",
+    "winter_2023_peppermint_penguin",
+    "shadow_dragon",
+    "summerfest_2023",
+    "meme_2023_sheeeeep",
+    "winter_2022_strawberry_shortcake_bat_dragon",
+}
+
+local RARITY_PROPS = {
+    { mega_neon = true,  neon = false, flyable = true, rideable = true }, -- MFR
+    { mega_neon = false, neon = true,  flyable = true, rideable = true }, -- NFR
+    { mega_neon = false, neon = false, flyable = true, rideable = true }, -- FR
+}
+
+local CHAT_PRESETS = {
+    "OMGGG TYSMM",
+    "wait let me check values",
+    "let me check elve",
+    "im over",
+    "can you add?",
+    "im literally followed you nigger",
+    "i hope you kill yourself you fat nigger bitch",
+    "can you spin this??",
+    "yes",
+    "no",
+    "offer for this?",
+    "guys they are trusted omg.",
+     "megans husband has such a big cock",
+      "can i offer my black auntie",
+       "im gonna rape you",
+       "im gonna ban you if you dont give me all your fucking pets",
+        "leah slits her wrists",
+         "leah took my husband but she took that cocaine didnt she",
+          "Loading random pet for restock..",
+           "Finished restocking for starpets influencer.",
+}
+
+local function formatPetName(kind)
+    return kind:gsub("_", " "):gsub("(%a)([%w_']*)", function(a,b)
+        return a:upper() .. b:lower()
+    end)
+end
+
+local function tagForProps(props)
+    if props and props.mega_neon then return "MFR" end
+    if props and props.neon then return "NFR" end
+    return "FR"
+end
+
+local function getLocalState()
+    if TradeApp and TradeApp._get_local_trade_state then
+        return TradeApp:_get_local_trade_state()
+    end
+    return nil
+end
+
+local partnerNameLabel      -- the label inside the trade UI
+local partnerNameConn       -- RenderStepped connection
+
+local function findPartnerNameLabel()
+    if partnerNameLabel and partnerNameLabel.Parent then
+        return partnerNameLabel
+    end
+
+    local frame = TradeApp.frame
+    if not frame or not frame.Parent then
+        return nil
+    end
+
+    local targetLower = tostring(currentTargetName or ""):lower()
+    if targetLower == "" then return nil end
+
+    for _, d in ipairs(frame:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and typeof(d.Text) == "string" then
+            if d.Text:lower() == targetLower then
+                partnerNameLabel = d
+                return partnerNameLabel
+            end
+        end
+    end
+    return nil
+end
+
+local function updatePartnerName()
+    if not fakeActive then return end
+    local lbl = findPartnerNameLabel()
+    if not lbl then return end
+    if typeof(lbl.Text) == "string"
+        and lbl.Text ~= currentTargetDisplayName
+        and lbl.Text:lower() == tostring(currentTargetName or ""):lower()
+    then
+        lbl.Text = currentTargetDisplayName
+    end
+end
+
+local function startNameFix()
+    if partnerNameConn then partnerNameConn:Disconnect() end
+    partnerNameConn = RunService.RenderStepped:Connect(updatePartnerName)
+end
+
+local function stopNameFix()
+    if partnerNameConn then
+        partnerNameConn:Disconnect()
+        partnerNameConn = nil
+    end
+    partnerNameLabel = nil
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "VisualTradeGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local introFrame = Instance.new("Frame")
+introFrame.Name = "IntroFrame"
+introFrame.Size = UDim2.new(0, 240, 0, 110)
+introFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+introFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+introFrame.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
+introFrame.BorderSizePixel = 0
+introFrame.Parent = screenGui
+
+local introCorner = Instance.new("UICorner")
+introCorner.CornerRadius = UDim.new(0, 14)
+introCorner.Parent = introFrame
+
+local introStroke = Instance.new("UIStroke")
+introStroke.Thickness = 2
+introStroke.Color = Color3.fromRGB(90, 110, 255)
+introStroke.Transparency = 0.2
+introStroke.Parent = introFrame
+
+local introTitle = Instance.new("TextLabel")
+introTitle.Size = UDim2.new(1, -20, 0, 28)
+introTitle.Position = UDim2.new(0, 10, 0, 10)
+introTitle.BackgroundTransparency = 1
+introTitle.Font = Enum.Font.GothamBold
+introTitle.TextSize = 18
+introTitle.TextColor3 = Color3.fromRGB(230, 235, 255)
+introTitle.TextXAlignment = Enum.TextXAlignment.Left
+introTitle.Text = "Fake Trade"
+introTitle.Parent = introFrame
+
+local introSub = Instance.new("TextLabel")
+introSub.Size = UDim2.new(1, -20, 0, 40)
+introSub.Position = UDim2.new(0, 10, 0, 38)
+introSub.BackgroundTransparency = 1
+introSub.Font = Enum.Font.Gotham
+introSub.TextSize = 12
+introSub.TextWrapped = true
+introSub.TextColor3 = Color3.fromRGB(180, 188, 230)
+introSub.TextXAlignment = Enum.TextXAlignment.Left
+introSub.Text = "Open the panel to start a local-only visual trade."
+introSub.Parent = introFrame
+
+local introButton = Instance.new("TextButton")
+introButton.Size = UDim2.new(0, 120, 0, 30)
+introButton.Position = UDim2.new(0, 10, 1, -40)
+introButton.BackgroundColor3 = Color3.fromRGB(90, 110, 255)
+introButton.Font = Enum.Font.GothamBold
+introButton.TextSize = 13
+introButton.TextColor3 = Color3.new(1,1,1)
+introButton.BorderSizePixel = 0
+introButton.Text = "Open Panel"
+introButton.Parent = introFrame
+
+local introButtonCorner = Instance.new("UICorner")
+introButtonCorner.CornerRadius = UDim.new(0, 8)
+introButtonCorner.Parent = introButton
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "ControlPanel"
+mainFrame.Size = UDim2.new(0, 185, 0, 380)
+mainFrame.Position = UDim2.new(0, 10, 0, 100)
+mainFrame.BackgroundColor3 = Color3.fromRGB(18, 20, 30)
+mainFrame.BorderSizePixel = 0
+mainFrame.Visible = false
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Parent = screenGui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 14)
+mainCorner.Parent = mainFrame
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(60, 70, 130)
+mainStroke.Thickness = 2
+mainStroke.Transparency = 0.25
+mainStroke.Parent = mainFrame
+
+local titleBar = Instance.new("TextLabel")
+titleBar.Size = UDim2.new(1, -20, 0, 24)
+titleBar.Position = UDim2.new(0, 10, 0, 6)
+titleBar.BackgroundTransparency = 1
+titleBar.Font = Enum.Font.GothamBold
+titleBar.TextSize = 14
+titleBar.Text = "Fake Trade"
+titleBar.TextColor3 = Color3.fromRGB(215, 220, 255)
+titleBar.TextXAlignment = Enum.TextXAlignment.Left
+titleBar.Parent = mainFrame
+
+local subtitle = Instance.new("TextLabel")
+subtitle.Size = UDim2.new(1, -20, 0, 18)
+subtitle.Position = UDim2.new(0, 10, 0, 22)
+subtitle.BackgroundTransparency = 1
+subtitle.Font = Enum.Font.Gotham
+subtitle.TextSize = 11
+subtitle.Text = "Idk what to make this"
+subtitle.TextColor3 = Color3.fromRGB(150, 160, 210)
+subtitle.TextXAlignment = Enum.TextXAlignment.Left
+subtitle.Parent = mainFrame
+
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(1, -20, 0, 22)
+tabBar.Position = UDim2.new(0, 10, 0, 40)
+tabBar.BackgroundTransparency = 1
+tabBar.BorderSizePixel = 0
+tabBar.Parent = mainFrame
+
+local tabMainButton = Instance.new("TextButton")
+tabMainButton.Size = UDim2.new(0.5, -2, 1, 0)
+tabMainButton.Position = UDim2.new(0, 0, 0, 0)
+tabMainButton.BackgroundColor3 = Color3.fromRGB(60, 70, 130)
+tabMainButton.BorderSizePixel = 0
+tabMainButton.Font = Enum.Font.GothamBold
+tabMainButton.TextSize = 11
+tabMainButton.TextColor3 = Color3.new(1,1,1)
+tabMainButton.Text = "main"
+tabMainButton.Parent = tabBar
+
+local tabMainCorner = Instance.new("UICorner")
+tabMainCorner.CornerRadius = UDim.new(0, 8)
+tabMainCorner.Parent = tabMainButton
+
+local tabChatButton = Instance.new("TextButton")
+tabChatButton.Size = UDim2.new(0.5, -2, 1, 0)
+tabChatButton.Position = UDim2.new(0.5, 2, 0, 0)
+tabChatButton.BackgroundColor3 = Color3.fromRGB(30, 34, 50)
+tabChatButton.BorderSizePixel = 0
+tabChatButton.Font = Enum.Font.GothamBold
+tabChatButton.TextSize = 11
+tabChatButton.TextColor3 = Color3.fromRGB(200, 205, 245)
+tabChatButton.Text = "chat"
+tabChatButton.Parent = tabBar
+
+local tabChatCorner = Instance.new("UICorner")
+tabChatCorner.CornerRadius = UDim.new(0, 8)
+tabChatCorner.Parent = tabChatButton
+
+local mainContent = Instance.new("Frame")
+mainContent.Name = "MainContent"
+mainContent.Size = UDim2.new(1, 0, 1, -60)
+mainContent.Position = UDim2.new(0, 0, 0, 60)
+mainContent.BackgroundTransparency = 1
+mainContent.BorderSizePixel = 0
+mainContent.Parent = mainFrame
+
+local chatContent = Instance.new("Frame")
+chatContent.Name = "ChatContent"
+chatContent.Size = UDim2.new(1, 0, 1, -60)
+chatContent.Position = UDim2.new(0, 0, 0, 60)
+chatContent.BackgroundTransparency = 1
+chatContent.BorderSizePixel = 0
+chatContent.Visible = false
+chatContent.Parent = mainFrame
+
+local function selectTab(which)
+    if which == "chat" then
+        mainContent.Visible = false
+        chatContent.Visible = true
+        tabMainButton.BackgroundColor3 = Color3.fromRGB(30, 34, 50)
+        tabMainButton.TextColor3 = Color3.fromRGB(200, 205, 245)
+        tabChatButton.BackgroundColor3 = Color3.fromRGB(60, 70, 130)
+        tabChatButton.TextColor3 = Color3.new(1,1,1)
+    else
+        mainContent.Visible = true
+        chatContent.Visible = false
+        tabMainButton.BackgroundColor3 = Color3.fromRGB(60, 70, 130)
+        tabMainButton.TextColor3 = Color3.new(1,1,1)
+        tabChatButton.BackgroundColor3 = Color3.fromRGB(30, 34, 50)
+        tabChatButton.TextColor3 = Color3.fromRGB(200, 205, 245)
+    end
+end
+
+tabMainButton.MouseButton1Click:Connect(function()
+    selectTab("main")
+end)
+
+tabChatButton.MouseButton1Click:Connect(function()
+    selectTab("chat")
+end)
+
+local startButton = Instance.new("TextButton")
+startButton.Name = "StartButton"
+startButton.Size = UDim2.new(1, -20, 0, 32)
+startButton.Position = UDim2.new(0, 10, 0, 0)
+startButton.BackgroundColor3 = Color3.fromRGB(82, 182, 134)
+startButton.Font = Enum.Font.GothamBold
+startButton.TextSize = 13
+startButton.TextColor3 = Color3.new(1,1,1)
+startButton.Text = "start visual trade"
+startButton.BorderSizePixel = 0
+startButton.Parent = mainContent
+
+local startCorner = Instance.new("UICorner")
+startCorner.CornerRadius = UDim.new(0, 10)
+startCorner.Parent = startButton
+
+local startStroke = Instance.new("UIStroke")
+startStroke.Color = Color3.fromRGB(60, 135, 110)
+startStroke.Thickness = 2
+startStroke.Parent = startButton
+
+local specLabel = Instance.new("TextLabel")
+specLabel.Size = UDim2.new(1, -20, 0, 16)
+specLabel.Position = UDim2.new(0, 10, 0, 38)
+specLabel.BackgroundTransparency = 1
+specLabel.Font = Enum.Font.Gotham
+specLabel.TextSize = 11
+specLabel.TextColor3 = Color3.fromRGB(170, 180, 230)
+specLabel.TextXAlignment = Enum.TextXAlignment.Left
+specLabel.Text = "max spectators"
+specLabel.Parent = mainContent
+
+local specFrame = Instance.new("Frame")
+specFrame.Size = UDim2.new(1, -20, 0, 24)
+specFrame.Position = UDim2.new(0, 10, 0, 56)
+specFrame.BackgroundColor3 = Color3.fromRGB(26, 28, 40)
+specFrame.BorderSizePixel = 0
+specFrame.Parent = mainContent
+
+local specCorner = Instance.new("UICorner")
+specCorner.CornerRadius = UDim.new(0, 8)
+specCorner.Parent = specFrame
+
+local spectatorButtons = {}
+
+local function setMaxSpectators(n)
+    desiredMaxSpectators = n
+    for i = 1, 5 do
+        local b = spectatorButtons[i]
+        if b then
+            b.BackgroundColor3 = (i == n) and Color3.fromRGB(82, 182, 134) or Color3.fromRGB(55, 60, 90)
+        end
+    end
+    startButton.Text = string.format("start visual trade  •  %d", desiredMaxSpectators)
+end
+
+for i = 1, 5 do
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 30, 0, 18)
+    b.Position = UDim2.new(0, 4 + (i-1)*34, 0, 3)
+    b.BackgroundColor3 = (i == desiredMaxSpectators) and Color3.fromRGB(82, 182, 134) or Color3.fromRGB(55, 60, 90)
+    b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 11
+    b.TextColor3 = Color3.new(1,1,1)
+    b.Text = tostring(i)
+    b.Parent = specFrame
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = b
+
+    spectatorButtons[i] = b
+    b.MouseButton1Click:Connect(function()
+        setMaxSpectators(i)
+    end)
+end
+
+local addButton = Instance.new("TextButton")
+addButton.Size = UDim2.new(1, -20, 0, 24)
+addButton.Position = UDim2.new(0, 10, 0, 86)
+addButton.BackgroundColor3 = Color3.fromRGB(235, 149, 84)
+addButton.BorderSizePixel = 0
+addButton.Font = Enum.Font.GothamBold
+addButton.TextSize = 12
+addButton.TextColor3 = Color3.new(1,1,1)
+addButton.Text = "add high tier pet"
+addButton.Parent = mainContent
+
+local addCorner = Instance.new("UICorner")
+addCorner.CornerRadius = UDim.new(0, 8)
+addCorner.Parent = addButton
+
+local removeButton = Instance.new("TextButton")
+removeButton.Size = UDim2.new(1, -20, 0, 24)
+removeButton.Position = UDim2.new(0, 10, 0, 114)
+removeButton.BackgroundColor3 = Color3.fromRGB(220, 90, 90)
+removeButton.BorderSizePixel = 0
+removeButton.Font = Enum.Font.GothamBold
+removeButton.TextSize = 12
+removeButton.TextColor3 = Color3.new(1,1,1)
+removeButton.Text = "remove last pet"
+removeButton.Parent = mainContent
+
+local removeCorner = Instance.new("UICorner")
+removeCorner.CornerRadius = UDim.new(0, 8)
+removeCorner.Parent = removeButton
+
+local forceAcceptButton = Instance.new("TextButton")
+forceAcceptButton.Size = UDim2.new(1, -20, 0, 24)
+forceAcceptButton.Position = UDim2.new(0, 10, 0, 142)
+forceAcceptButton.BackgroundColor3 = Color3.fromRGB(120, 140, 230)
+forceAcceptButton.BorderSizePixel = 0
+forceAcceptButton.Font = Enum.Font.GothamBold
+forceAcceptButton.TextSize = 12
+forceAcceptButton.TextColor3 = Color3.new(1, 1, 1)
+forceAcceptButton.Text = "make partner accept"
+forceAcceptButton.Parent = mainContent
+
+local forceAcceptCorner = Instance.new("UICorner")
+forceAcceptCorner.CornerRadius = UDim.new(0, 8)
+forceAcceptCorner.Parent = forceAcceptButton
+local playerSection = Instance.new("Frame")
+playerSection.Size = UDim2.new(1, -20, 0, 150)
+playerSection.Position = UDim2.new(0, 10, 0, 178)
+playerSection.BackgroundColor3 = Color3.fromRGB(22, 24, 35)
+playerSection.BorderSizePixel = 0
+playerSection.Parent = mainContent
+
+local playerCorner = Instance.new("UICorner")
+playerCorner.CornerRadius = UDim.new(0, 10)
+playerCorner.Parent = playerSection
+
+local playerTitle = Instance.new("TextLabel")
+playerTitle.Size = UDim2.new(1, -40, 0, 18)
+playerTitle.Position = UDim2.new(0, 10, 0, 6)
+playerTitle.BackgroundTransparency = 1
+playerTitle.Font = Enum.Font.GothamBold
+playerTitle.TextSize = 11
+playerTitle.TextColor3 = Color3.fromRGB(200, 205, 245)
+playerTitle.TextXAlignment = Enum.TextXAlignment.Left
+playerTitle.Text = "trade partner"
+playerTitle.Parent = playerSection
+
+local refreshButton = Instance.new("TextButton")
+refreshButton.Size = UDim2.new(0, 22, 0, 18)
+refreshButton.Position = UDim2.new(1, -26, 0, 6)
+refreshButton.BackgroundTransparency = 1
+refreshButton.Font = Enum.Font.GothamBold
+refreshButton.TextSize = 13
+refreshButton.TextColor3 = Color3.fromRGB(150, 160, 230)
+refreshButton.Text = "⟳"
+refreshButton.Parent = playerSection
+
+local nameBox = Instance.new("TextBox")
+nameBox.Size = UDim2.new(1, -14, 0, 20)
+nameBox.Position = UDim2.new(0, 7, 0, 26)
+nameBox.BackgroundColor3 = Color3.fromRGB(28, 30, 45)
+nameBox.BorderSizePixel = 0
+nameBox.Font = Enum.Font.Gotham
+nameBox.TextSize = 11
+nameBox.TextColor3 = Color3.fromRGB(220, 225, 255)
+nameBox.PlaceholderText = "type username + press Enter"
+nameBox.PlaceholderColor3 = Color3.fromRGB(120, 125, 175)
+nameBox.ClearTextOnFocus = false
+nameBox.Text = ""
+nameBox.Parent = playerSection
+
+local nameBoxCorner = Instance.new("UICorner")
+nameBoxCorner.CornerRadius = UDim.new(0, 6)
+nameBoxCorner.Parent = nameBox
+
+local playerList = Instance.new("ScrollingFrame")
+playerList.Size = UDim2.new(1, -14, 1, -54)
+playerList.Position = UDim2.new(0, 7, 0, 48)
+playerList.BackgroundColor3 = Color3.fromRGB(18, 20, 32)
+playerList.BorderSizePixel = 0
+playerList.ScrollBarThickness = 4
+playerList.CanvasSize = UDim2.new()
+playerList.Parent = playerSection
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.Padding = UDim.new(0, 3)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Parent = playerList
+
+local selectedNameLabel = Instance.new("TextLabel")
+selectedNameLabel.Size = UDim2.new(1, -20, 0, 16)
+selectedNameLabel.Position = UDim2.new(0, 10, 1, -26)
+selectedNameLabel.BackgroundTransparency = 1
+selectedNameLabel.Font = Enum.Font.Gotham
+selectedNameLabel.TextSize = 11
+selectedNameLabel.TextColor3 = Color3.fromRGB(210, 215, 255)
+selectedNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+selectedNameLabel.Text = currentTargetDisplayName
+selectedNameLabel.Parent = mainContent
+
+local selectedIdLabel = Instance.new("TextLabel")
+selectedIdLabel.Size = UDim2.new(1, -20, 0, 14)
+selectedIdLabel.Position = UDim2.new(0, 10, 1, -12)
+selectedIdLabel.BackgroundTransparency = 1
+selectedIdLabel.Font = Enum.Font.Gotham
+selectedIdLabel.TextSize = 10
+selectedIdLabel.TextColor3 = Color3.fromRGB(150, 155, 205)
+selectedIdLabel.TextXAlignment = Enum.TextXAlignment.Left
+selectedIdLabel.Text = "ID: visual_only"
+selectedIdLabel.Visible = false
+selectedIdLabel.Parent = mainContent
+
+local function setCurrentTarget(displayName, id)
+    currentTargetDisplayName = displayName
+    currentTargetName        = displayName
+    currentTargetId          = id or 0
+
+    selectedNameLabel.Text = currentTargetDisplayName
+    if currentTargetId ~= 0 then
+        selectedIdLabel.Text = "ID: "..tostring(currentTargetId)
+    else
+        selectedIdLabel.Text = "ID: visual_only"
+    end
+end
+
+local function getUserIdFromName(name)
+    if cachedUserIds[name] ~= nil then
+        return cachedUserIds[name]
+    end
+    local id = 0
+    local ok, result = pcall(function()
+        return Players:GetUserIdFromNameAsync(name)
+    end)
+    if ok then
+        id = result
+    end
+    cachedUserIds[name] = id
+    return id
+end
+
+local function createPlayerButton(displayName, userId, isStatic, layoutOrder)
+    local b = Instance.new("TextButton")
+    b.Name = displayName
+    b.Size = UDim2.new(1, 0, 0, 22)
+    b.BorderSizePixel = 0
+    b.Font = Enum.Font.Gotham
+    b.TextSize = 11
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.Text = "  " .. displayName
+    b.LayoutOrder = layoutOrder or 0
+
+    if isStatic then
+        b.BackgroundColor3 = Color3.fromRGB(185, 205, 255)
+        b.TextColor3 = Color3.fromRGB(25, 35, 60)
+    else
+        b.BackgroundColor3 = Color3.fromRGB(34, 36, 52)
+        b.TextColor3 = Color3.fromRGB(225, 230, 255)
+    end
+
+    b.Parent = playerList
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = b
+
+    b.MouseButton1Click:Connect(function()
+        setCurrentTarget(displayName, userId)
+        print("[FakeTrade] selected partner:", displayName, "(ID:", userId, ")")
+    end)
+end
+
+local function rebuildPlayerList()
+    for _, child in ipairs(playerList:GetChildren()) do
+        if child:IsA("TextButton") then
+            child:Destroy()
+        end
+    end
+
+    local usedReal = {}
+    local order = 0
+
+    for _, name in ipairs(STATIC_PLAYER_NAMES) do
+        local plr = Players:FindFirstChild(name)
+        if plr and plr ~= LocalPlayer then
+            usedReal[plr] = true
+            createPlayerButton(plr.Name, plr.UserId, false, order)
+        else
+            local uid = getUserIdFromName(name)
+            createPlayerButton(name, uid, true, order)
+        end
+        order += 1
+    end
+    
+    local realOrder = 100
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and not usedReal[plr] and not table.find(STATIC_PLAYER_NAMES, plr.Name) then
+            createPlayerButton(plr.Name, plr.UserId, false, realOrder)
+            realOrder += 1
+        end
+    end
+
+    playerList.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y)
+end
+
+refreshButton.MouseButton1Click:Connect(rebuildPlayerList)
+Players.PlayerAdded:Connect(rebuildPlayerList)
+Players.PlayerRemoving:Connect(rebuildPlayerList)
+rebuildPlayerList()
+
+nameBox.FocusLost:Connect(function(enterPressed)
+    if not enterPressed then return end
+    local text = nameBox.Text or ""
+    text = text:gsub("^%s+", ""):gsub("%s+$", "")
+    if text == "" then return end
+
+    local typedDisplay = text
+    local lookupName   = text
+    local chosenId     = 0
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Name:lower() == text:lower() then
+            lookupName = plr.Name
+            chosenId   = plr.UserId
+            break
+        end
+    end
+
+    if chosenId == 0 then
+        chosenId = getUserIdFromName(lookupName)
+    end
+
+    setCurrentTarget(typedDisplay, chosenId)
+    print("[FakeTrade] manual partner set to:", typedDisplay, "(ID:", chosenId, ")")
+end)
+
+local function startSpectatorLoop()
+    if spectatorLoopRunning then return end
+    spectatorLoopRunning = true
+
+    task.spawn(function()
+        while spectatorLoopRunning and fakeActive do
+            task.wait(math.random(7, 13))
+            if not fakeActive then break end
+            local newCount = math.random(1, math.max(1, desiredMaxSpectators))
+            local s = getLocalState()
+            if s and s.trade_id == fakeTradeId then
+                allowOverwrite = true
+                s.subscriber_count = newCount
+                TradeApp:_overwrite_local_trade_state(s)
+                allowOverwrite = false
+                TradeApp:refresh_all()
+            end
+        end
+        spectatorLoopRunning = false
+    end)
+end
+
+local function stopSpectatorLoop()
+    spectatorLoopRunning = false
+end
+
+local function restoreHooks()
+    TradeApp._on_accept_pressed           = originalAccept
+    TradeApp._on_confirm_pressed          = originalConfirm
+    TradeApp._overwrite_local_trade_state = originalOverwrite
+    TradeApp._remove_item_from_my_offer   = originalRemove
+    stopNameFix()
+end
+
+local function startTimeoutWatcher()
+    task.delay(60, function()
+        if fakeActive then
+            warn("[FakeTrade] timeout – restoring TradeApp hooks")
+            fakeActive = false
+            fakeTradeId = nil
+            stopSpectatorLoop()
+            restoreHooks()
+        end
+    end)
+end
+
+local function removeLastFromOffer(sideKey)
+    local s = getLocalState()
+    if not s or s.trade_id ~= fakeTradeId then return nil, nil end
+    local offer = s[sideKey]
+    if not offer or not offer.items or #offer.items == 0 then return nil, nil end
+
+    local removed = table.remove(offer.items)
+
+    allowOverwrite = true
+    TradeApp:_overwrite_local_trade_state(s)
+    allowOverwrite = false
+    TradeApp:_lock_trade_for_appropriate_time()
+    tradeUnlockAt = os.clock() + LOCK_DURATION
+    TradeApp:refresh_all()
+
+    return removed, sideKey
+end
+
+local function forcePartnerAccept()
+    if os.clock() < tradeUnlockAt then
+        warn("[FakeTrade] trade is currently locked – wait for the timer to finish")
+        return
+    end
+
+    local s = getLocalState()
+    if not s or s.trade_id ~= fakeTradeId then
+        warn("[FakeTrade] no active visual trade – can't force accept")
+        return
+    end
+
+    s.recipient_offer.negotiated  = true
+    s.recipient_offer.confirmed   = false
+    s.recipient_offer.player_name = currentTargetDisplayName
+    s.offer_version               = (s.offer_version or 1) + 1
+
+    allowOverwrite = true
+    TradeApp:_overwrite_local_trade_state(s)
+    allowOverwrite = false
+    TradeApp:refresh_all()
+end
+
+local function enableFakeTradeHooks()
+    fakeActive = true
+    startNameFix()
+
+    TradeApp._overwrite_local_trade_state = function(self, trade, ...)
+        if trade == nil and fakeActive and not allowOverwrite then
+            print("[FakeTrade] trade state cleared externally – resetting hooks")
+            fakeActive = false
+            fakeTradeId = nil
+            stopSpectatorLoop()
+            restoreHooks()
+            return originalOverwrite(self, trade, ...)
+        end
+
+        if not fakeActive or allowOverwrite then
+            local result = originalOverwrite(self, trade, ...)
+            return result
+        end
+
+        if trade == nil then
+            fakeActive = false
+            fakeTradeId = nil
+            stopSpectatorLoop()
+            restoreHooks()
+            local result = originalOverwrite(self, trade, ...)
+            return result
+        end
+
+        if trade and trade.trade_id and trade.trade_id ~= fakeTradeId then
+            print("[FakeTrade] blocked real trade overwrite while visual trade active")
+            return
+        end
+
+        local result = originalOverwrite(self, trade, ...)
+        return result
+    end
+
+    TradeApp._remove_item_from_my_offer = function(self, item)
+        local s = getLocalState()
+        if not fakeActive or not s or s.trade_id ~= fakeTradeId or not item or not item.unique then
+            return originalRemove(self, item)
+        end
+
+        local removedItem, removedSide
+
+        local function trySide(key)
+            local offer = s[key]
+            if not offer or not offer.items then return false end
+            for i, v in ipairs(offer.items) do
+                if v.unique == item.unique then
+                    removedItem = v
+                    removedSide = key
+                    table.remove(offer.items, i)
+                    return true
+                end
+            end
+            return false
+        end
+
+        if not trySide("recipient_offer") and not trySide("sender_offer") then
+            return originalRemove(self, item)
+        end
+
+        allowOverwrite = true
+        TradeApp:_overwrite_local_trade_state(s)
+        allowOverwrite = false
+        TradeApp:_lock_trade_for_appropriate_time()
+        TradeApp:refresh_all()
+
+        if removedItem then
+            local tag = removedItem.properties and tagForProps(removedItem.properties) or "FR"
+            local nice = removedItem.kind and formatPetName(removedItem.kind) or "Pet"
+            local who  = (removedSide == "sender_offer") and LocalPlayer.Name or currentTargetDisplayName
+
+            self:_render_message_in_trade_chat(
+                nil,
+                string.format("%s removed %s %s", who, tag, nice),
+                false,
+                true
+            )
+
+            print(string.format(
+                "[FakeTrade] removed %s %s from %s offer (5-second lock)",
+                tag,
+                removedItem.kind or "?",
+                who
+            ))
+        end
+    end
+
+    TradeApp._on_accept_pressed = function(self, ...)
+        local s = self:_get_local_trade_state()
+        if not fakeActive or not s or s.trade_id ~= fakeTradeId then
+            return originalAccept(self, ...)
+        end
+
+        print("[FakeTrade] you clicked Accept")
+
+        s.sender_offer.negotiated   = true
+        s.sender_offer.confirmed    = false
+        s.sender_offer.player_name  = LocalPlayer.Name
+
+        if s.recipient_offer and s.recipient_offer.negotiated then
+            s.current_stage = "confirmation"
+            s.offer_version = (s.offer_version or 1) + 1
+
+            allowOverwrite = true
+            TradeApp:_overwrite_local_trade_state(s)
+            allowOverwrite = false
+            TradeApp:refresh_all()
+
+            print("[FakeTrade] both accepted – now in confirmation stage (manual partner accept)")
+            return
+        end
+
+        allowOverwrite = true
+        TradeApp:_overwrite_local_trade_state(s)
+        allowOverwrite = false
+        TradeApp:refresh_all()
+
+        print("[FakeTrade] auto-accepting partner in 2 seconds...")
+        task.delay(2, function()
+            local s2 = getLocalState()
+            if not fakeActive or not s2 or s2.trade_id ~= fakeTradeId then return end
+
+            s2.recipient_offer.negotiated  = true
+            s2.recipient_offer.confirmed   = false
+            s2.recipient_offer.player_name = currentTargetDisplayName
+            s2.current_stage               = "confirmation"
+            s2.offer_version               = (s2.offer_version or 1) + 1
+
+            allowOverwrite = true
+            TradeApp:_overwrite_local_trade_state(s2)
+            allowOverwrite = false
+            TradeApp:refresh_all()
+
+            print("[FakeTrade] both accepted – now in confirmation stage (auto partner)")
+        end)
+    end
+
+    TradeApp._on_confirm_pressed = function(self, ...)
+        local s = self:_get_local_trade_state()
+        if not fakeActive or not s or s.trade_id ~= fakeTradeId then
+            return originalConfirm(self, ...)
+        end
+
+        print("[FakeTrade] you clicked Confirm")
+
+        s.sender_offer.negotiated  = true
+        s.sender_offer.confirmed   = true
+        s.sender_offer.player_name = LocalPlayer.Name
+
+        allowOverwrite = true
+        TradeApp:_overwrite_local_trade_state(s)
+        allowOverwrite = false
+        TradeApp:refresh_all()
+
+        print("[FakeTrade] auto-confirming partner in 2 seconds...")
+        task.delay(2, function()
+            local s2 = getLocalState()
+            if not s2 or not fakeActive or s2.trade_id ~= fakeTradeId then return end
+
+            s2.recipient_offer.negotiated  = true
+            s2.recipient_offer.confirmed   = true
+            s2.recipient_offer.player_name = currentTargetDisplayName
+
+            allowOverwrite = true
+            TradeApp:_overwrite_local_trade_state(s2)
+            allowOverwrite = false
+            TradeApp:refresh_all()
+
+            print("[FakeTrade] both confirmed – finishing trade...")
+
+            task.delay(2, function()
+                pcall(function()
+                    if self.frame and self.frame.Parent then
+                        self.frame:Destroy()
+                    end
+                    self:hide()
+                    allowOverwrite = true
+                    self:_overwrite_local_trade_state(nil)
+                    allowOverwrite = false
+                end)
+
+                fakeActive = false
+                fakeTradeId = nil
+                stopSpectatorLoop()
+                restoreHooks()
+
+                UIManager.apps.HintApp:hint({
+                    text = "The trade was successful!";
+                    length = 3;
+                    overridable = true;
+                })
+
+                print("[FakeTrade] Trade finished.")
+            end)
+        end)
+    end
+end
+
+local function addPetToPartner()
+    local s = getLocalState()
+    if not s or s.trade_id ~= fakeTradeId then
+        warn("[FakeTrade] no active visual trade – start one first")
+        return
+    end
+
+    local offer = s.recipient_offer
+    if not offer then
+        warn("[FakeTrade] recipient_offer missing in state")
+        return
+    end
+
+    local petKind = PET_KINDS[math.random(1, #PET_KINDS)]
+    local propsDef = RARITY_PROPS[math.random(1, #RARITY_PROPS)]
+    local props = {
+        mega_neon = propsDef.mega_neon;
+        neon      = propsDef.neon;
+        flyable   = propsDef.flyable;
+        rideable  = propsDef.rideable;
+    }
+
+    offer.items = offer.items or {}
+    local newItem = {
+        unique     = "pet_" .. petKind .. "_" .. math.random(10000, 99999),
+        category   = "pets",
+        kind       = petKind,
+        properties = props,
+    }
+    table.insert(offer.items, newItem)
+
+        allowOverwrite = true
+    TradeApp:_overwrite_local_trade_state(s)
+    allowOverwrite = false
+    TradeApp:_lock_trade_for_appropriate_time()
+    tradeUnlockAt = os.clock() + LOCK_DURATION
+    TradeApp:refresh_all()
+
+    local tag = tagForProps(props)
+    local niceName = formatPetName(petKind)
+    TradeApp:_render_message_in_trade_chat(nil,
+        string.format("%s added %s %s", currentTargetDisplayName, tag, niceName),
+        false, true
+    )
+
+    print(string.format("[FakeTrade] added %s %s to partner offer (5-second lock)", tag, petKind))
+end
+
+local function removePetFromPartner()
+    local removed = select(1, removeLastFromOffer("recipient_offer"))
+    if not removed then
+        print("[FakeTrade] no pets to remove from partner")
+        return
+    end
+
+    local tag = removed.properties and tagForProps(removed.properties) or "FR"
+    local niceName = removed.kind and formatPetName(removed.kind) or "Pet"
+    TradeApp:_render_message_in_trade_chat(nil,
+        string.format("%s removed %s %s", currentTargetDisplayName, tag, niceName),
+        false, true
+    )
+    print(string.format("[FakeTrade] removed %s %s from partner offer (5-second lock)", tag, removed.kind or "?"))
+end
+
+addButton.MouseButton1Click:Connect(addPetToPartner)
+removeButton.MouseButton1Click:Connect(removePetFromPartner)
+forceAcceptButton.MouseButton1Click:Connect(forcePartnerAccept)
+
+local function startVisualTrade()
+    if fakeActive then
+        local s = getLocalState()
+        if not s or s.trade_id ~= fakeTradeId then
+            warn("[FakeTrade] stale visual trade state detected – resetting.")
+            fakeActive = false
+            fakeTradeId = nil
+            stopSpectatorLoop()
+            restoreHooks()
+        else
+            warn("[FakeTrade] visual trade already running")
+            return
+        end
+    end
+
+    local targetPlayer = nil
+    if currentTargetId and currentTargetId ~= 0 then
+        targetPlayer = Players:GetPlayerByUserId(currentTargetId)
+    end
+    if not targetPlayer and currentTargetName then
+        targetPlayer = Players:FindFirstChild(currentTargetName)
+    end
+    if targetPlayer == LocalPlayer then
+        targetPlayer = nil
+    end
+
+    if targetPlayer then
+        currentTargetName = targetPlayer.Name
+        currentTargetId   = targetPlayer.UserId
+        currentTargetDisplayName = targetPlayer.Name
+        selectedNameLabel.Text = currentTargetDisplayName
+    end
+
+    local target
+    if targetPlayer then
+        target = targetPlayer
+    else
+        target = {
+            Name        = currentTargetName,
+            UserId      = currentTargetId or 0,
+            DisplayName = currentTargetDisplayName,
+        }
+    end
+
+    local dlg = {
+        text  = string.format("%s sent you a trade request", currentTargetDisplayName),
+        left  = "Decline",
+        right = "Accept",
+    }
+
+    local response = UIManager.apps.DialogApp:dialog(dlg)
+    print("[FakeTrade] trade request response:", response)
+
+    if response ~= "Accept" then
+        print("[FakeTrade] trade declined")
+        return
+    end
+
+    fakeTradeId = "visual_trade_" .. math.random(10000, 99999)
+
+    local state = {
+        trade_id  = fakeTradeId,
+        sender    = LocalPlayer,
+        recipient = target,
+    }
+
+    state.sender_offer = {
+        items       = {},
+        negotiated  = false,
+        confirmed   = false,
+        player_name = LocalPlayer.Name,
+    }
+
+    state.recipient_offer = {
+        items       = {},
+        negotiated  = false,
+        confirmed   = false,
+        player_name = currentTargetDisplayName,
+    }
+
+    state.current_stage               = "negotiation"
+    state.offer_version               = 1
+    state.sender_has_trade_license    = true
+    state.recipient_has_trade_license = true
+    state.busy_indicators             = {}
+    state.subscriber_count            = 1
+
+    print(string.format("[FakeTrade] setting up empty visual trade with %d max spectators...", desiredMaxSpectators))
+    print(string.format("[FakeTrade] trading with: %s (ID: %d)", currentTargetDisplayName, currentTargetId))
+
+    enableFakeTradeHooks()
+    startTimeoutWatcher()
+
+    allowOverwrite = true
+    TradeApp:_overwrite_local_trade_state(state)
+    allowOverwrite = false
+
+    UIManager.set_app_visibility("TradeApp", true)
+    task.wait(0.4)
+    TradeApp:refresh_all()
+
+    startSpectatorLoop()
+
+    print("[FakeTrade] trade window opened")
+end
+
+startButton.MouseButton1Click:Connect(startVisualTrade)
+
+local function showMainPanel()
+    mainContent.Visible = true
+    chatContent.Visible = false
+
+    mainFrame.Visible = true
+    mainFrame.Position = UDim2.new(0, -210, 0, 100)
+    local tween = TweenService:Create(
+        mainFrame,
+        TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        { Position = UDim2.new(0, 10, 0, 100) }
+    )
+    tween:Play()
+
+    local introTween = TweenService:Create(
+        introFrame,
+        TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        { BackgroundTransparency = 1 }
+    )
+    introTween:Play()
+    task.delay(0.25, function()
+        introFrame:Destroy()
+    end)
+
+    selectTab("main")
+end
+
+introButton.MouseButton1Click:Connect(showMainPanel)
+
+local chatCard = Instance.new("Frame")
+chatCard.Size = UDim2.new(1, -20, 1, -20)
+chatCard.Position = UDim2.new(0, 10, 0, 10)
+chatCard.BackgroundColor3 = Color3.fromRGB(22, 24, 36)
+chatCard.BorderSizePixel = 0
+chatCard.Parent = chatContent
+
+local chatCardCorner = Instance.new("UICorner")
+chatCardCorner.CornerRadius = UDim.new(0, 10)
+chatCardCorner.Parent = chatCard
+
+local chatTitle = Instance.new("TextLabel")
+chatTitle.Size = UDim2.new(1, -16, 0, 20)
+chatTitle.Position = UDim2.new(0, 8, 0, 6)
+chatTitle.BackgroundTransparency = 1
+chatTitle.Font = Enum.Font.GothamBold
+chatTitle.TextSize = 12
+chatTitle.TextColor3 = Color3.fromRGB(210, 215, 255)
+chatTitle.TextXAlignment = Enum.TextXAlignment.Left
+chatTitle.Text = "partner quick chat"
+chatTitle.Parent = chatCard
+
+local chatSub = Instance.new("TextLabel")
+chatSub.Size = UDim2.new(1, -16, 0, 16)
+chatSub.Position = UDim2.new(0, 8, 0, 24)
+chatSub.BackgroundTransparency = 1
+chatSub.Font = Enum.Font.Gotham
+chatSub.TextSize = 10
+chatSub.TextColor3 = Color3.fromRGB(160, 168, 220)
+chatSub.TextXAlignment = Enum.TextXAlignment.Left
+chatSub.Text = "click to send as if your partner typed it"
+chatSub.Parent = chatCard
+
+local chatList = Instance.new("ScrollingFrame")
+chatList.Size = UDim2.new(1, -16, 1, -48)
+chatList.Position = UDim2.new(0, 8, 0, 40)
+chatList.BackgroundColor3 = Color3.fromRGB(18, 20, 30)
+chatList.BorderSizePixel = 0
+chatList.ScrollBarThickness = 4
+chatList.CanvasSize = UDim2.new()
+chatList.Parent = chatCard
+
+local chatLayout = Instance.new("UIListLayout")
+chatLayout.Padding = UDim.new(0, 4)
+chatLayout.SortOrder = Enum.SortOrder.LayoutOrder
+chatLayout.Parent = chatList
+
+for _, msg in ipairs(CHAT_PRESETS) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 24)
+    btn.BackgroundColor3 = Color3.fromRGB(32, 35, 52)
+    btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.Gotham
+    btn.TextSize = 11
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.TextColor3 = Color3.fromRGB(220, 225, 255)
+    btn.Text = "  " .. msg
+    btn.Parent = chatList
+
+    local bc = Instance.new("UICorner")
+    bc.CornerRadius = UDim.new(0, 6)
+    bc.Parent = btn
+
+    btn.MouseButton1Click:Connect(function()
+        local state = getLocalState()
+        if not state then
+            warn("[FakeTrade] no open trade – quick chat ignored")
+            return
+        end
+
+        local senderRef = state.recipient
+        if not senderRef or type(senderRef) ~= "table" then
+            senderRef = {
+                Name        = currentTargetName,
+                UserId      = currentTargetId or 0,
+                DisplayName = currentTargetDisplayName,
+            }
+        end
+
+        TradeApp:_render_message_in_trade_chat(
+            senderRef,
+            msg,
+            false,
+            false
+        )
+
+        print("[FakeTrade] partner quick-chat ->", currentTargetDisplayName, ":", msg)
+    end)
+end
+
+chatList.CanvasSize = UDim2.new(0, 0, 0, chatLayout.AbsoluteContentSize.Y)
+
+print("[FakeTrade] Visual Trade Tool loaded.")
+print("  – choose a partner (list or textbox), then click 'start visual trade'.")
+print("  – capitalization of the partner name in the trade window now follows whatever you type/click.") 
