@@ -1341,18 +1341,14 @@ local function showTradeRequest()
     end
 
     local name = CONFIG.PARTNER_NAME
-    local trade_request_table_friend = {
-        ['text'] = name .. ' sent you a trade request',
-        ['left'] = 'Decline',
-        ['right'] = 'Accept',
-        ['dialog_type'] = 'HeaderDialog',
-        ['header'] = 'Verified Friend',
-        ['header_icon'] = 'rbxassetid://84667805159408',
-        ['handle'] = 'mock_trade_request',
+    -- Use simple dialog format that works (from working script)
+    local dlg = {
+        text  = string.format("%s sent you a trade request", name),
+        left  = "Decline",
+        right = "Accept",
     }
 
-    local dialogApp =
-        load('UIManager').apps.DialogApp:dialog(trade_request_table_friend)
+    local dialogApp = UIManager.apps.DialogApp:dialog(dlg)
 
     if dialogApp == 'Accept' then
         mockState.active = false
@@ -4661,7 +4657,6 @@ task.spawn(function()
         end
     end
 end)
-
 print('[FakeTrade] ==========================================')
 print('[FakeTrade] Script fully loaded! Control panel should be visible.')
 print('[FakeTrade] If you do not see the panel, check for errors above.')
